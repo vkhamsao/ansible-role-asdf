@@ -1,0 +1,137 @@
+---
+- name: "Install plugin dependencies with apt"
+  ansible.builtin.apt:
+    name: "{{ asdf_apt_optional_dependencies }}"
+    install_recommends: false
+    cache_valid_time: "{{ apt_cache_valid_time }}"
+  retries: "{{ remote_package_retries }}"
+  register: apt_result
+  until: apt_result is succeeded
+  become: true
+  when: ansible_os_family == "Debian"
+
+- name: "Install plugin dependencies with yum"
+  ansible.builtin.yum:
+    name: "{{ asdf_yum_optional_dependencies }}"
+  retries: "{{ remote_package_retries }}"
+  register: yum_result
+  until: yum_result is succeeded
+  become: true
+  when: ansible_os_family == "RedHat"
+
+- name: "List asdf plugins"
+  ansible.builtin.command: "bash -lc 'source {{ asdf_source_file }} && asdf plugin-list'"
+  register: asdf_plugin_list
+  changed_when: false
+  failed_when: "'No plugins installed' not in asdf_plugin_list.stderr and asdf_plugin_list.rc != 0"
+
+- name: "Install plugins"
+  ansible.builtin.command: "bash -lc 'source {{ asdf_source_file }} && asdf plugin-add {{ item.name }} {{ item.repository
+    | default() }}'"
+  args:
+    creates: "{{ asdf_dir }}/plugins/{{ item.name }}"
+  with_items: "{{ asdf_plugins }}"
+  when: "item.name not in asdf_plugin_list.stdout_lines"
+  become: true
+  become_user: "{{ asdf_user }}"
+
+- name: "Nodejs specific tasks"
+  ansible.builtin.include_tasks: "plugins/nodejs.yml"
+  when: '"nodejs" in item["name"]'
+  with_items: "{{ asdf_plugins }}"
+
+- name: "Erlang specific tasks"
+  ansible.builtin.include_tasks: "plugins/erlang.yml"
+  when: '"erlang" in item["name"]'
+  with_items: "{{ asdf_plugins }}"
+
+- name: "Ruby specific tasks"
+  ansible.builtin.include_tasks: "plugins/ruby.yml"
+  when: '"ruby" in item["name"]'
+  with_items: "{{ asdf_plugins }}"
+
+- name: "PHP specific tasks"
+  ansible.builtin.include_tasks: "plugins/php.yml"
+  when: '"php" in item["name"]'
+  with_items: "{{ asdf_plugins }}"
+
+- name: Capture asdf current version output
+  ansible.builtin.shell:
+    cmd: "set -o pipefail && source {{ asdf_source_file }} && asdf current | awk '{print $1, $2}'"
+  register: asdf_current_output
+  changed_when: false
+  args:
+    executable: /bin/bash
+  become: true
+  become_user: "{{ asdf_user }}"
+
+- name: Parse asdf current version output
+  ansible.builtin.set_fact:
+    asdf_current_versions: "{{ asdf_current_output.stdout_lines | map('split', ' ') | community.general.dict }}"
+
+- name: Capture asdf latest version output
+  ansible.builtin.command: "bash -lc 'source {{ asdf_source_file }} && echo \"{{ item.name }} $(asdf latest {{ item.name }})\"'"
+  register: asdf_latest_output
+  changed_when: false
+  with_items: "{{ asdf_plugins }}"
+  become: true
+  become_user: "{{ asdf_user }}"
+
+- name: Parse asdf latest version output
+  ansible.builtin.set_fact:
+    asdf_latest_versions: |
+      {{
+        asdf_latest_output.results |
+        map(attribute='stdout') |
+        map('split', ' ') |
+        community.general.dict
+      }}
+
+- name: "Install apps"
+  ansible.builtin.command: |
+    bash -lc 'source {{ asdf_source_file }} && asdf list {{ item.0.name }} 2>&1 | \
+      grep -q "{{ asdf_latest_versions[item.0.name] if item.1 == "latest" else item.1 }}" || asdf install {{ item.0.name }} {{ item.1 }}'
+  register: asdf_install_result
+  args:
+    creates: "{{ asdf_dir }}/installs/{{ item.0.name }}/{{ item.1 }}"
+  with_subelements:
+    - "{{ asdf_plugins }}"
+    - versions
+    - flags:
+      skip_missing: true
+  when: asdf_plugins | length > 0
+  changed_when: "'installation was successful' in asdf_install_result.stdout"
+  become: true
+  become_user: "{{ asdf_user }}"
+
+- name: "Uninstall apps"
+  ansible.builtin.command: "bash -lc 'source {{ asdf_source_file }} && asdf uninstall {{ item.0.name }} {{ item.1 }}'"
+  args:
+    removes: "{{ asdf_dir }}/installs/{{ item.0.name }}/{{ item.1 }}"
+  with_subelements:
+    - "{{ asdf_plugins }}"
+    - delete_versions
+    - flags:
+      skip_missing: true
+  when: asdf_plugins | length > 0
+  become: true
+  become_user: "{{ asdf_user }}"
+
+- name: "Set global app versions"
+  ansible.builtin.command: |
+    bash -lc 'source {{ asdf_source_file }} && \
+    asdf global {{ item.name }} {{ item.global | default(item.versions | difference(item.delete_versions|default([])) | sort | first) }}'
+  register: asdf_global_result
+  when: item.global != asdf_current_versions.get(item.name) and asdf_latest_versions.get(item.name) != asdf_current_versions.get(item.name)
+  changed_when: asdf_global_result.rc == 0
+  with_items: "{{ asdf_plugins }}"
+  become: true
+  become_user: "{{ asdf_user }}"
+- name: "Set group permissions"
+  become: true
+  ansible.builtin.file:
+    path: "{{ asdf_dir | default(user_info.home + '/.asdf') }}"
+    owner: "{{ asdf_user }}"
+    group: "{{ asdf_group }}"
+    state: directory
+    recurse: true

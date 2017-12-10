@@ -1,0 +1,67 @@
+---
+- name: "Get asdf user info"
+  ansible.builtin.user:
+    name: "{{ asdf_user }}"
+    state: present
+  register: user_info
+
+- name: "Set asdf_dir"
+  ansible.builtin.set_fact:
+    asdf_dir: >-
+      {%- if asdf_shared_install is defined and asdf_shared_install -%}/opt/asdf{%- else -%}{{ user_info.home + '/.asdf' }}{%-
+      endif -%}
+  when: asdf_dir is not defined
+
+- name: "Set source file"
+  ansible.builtin.set_fact:
+    asdf_source_file: >-
+      {%- if asdf_shared_install is defined and asdf_shared_install -%}{{ asdf_source_file | default('/etc/profile.d/asdf.sh')
+      }}{%- else %}{{ asdf_source_file | default(user_info.home + '/.asdf/asdf.sh') }}{%- endif -%}
+
+- name: "Install asdf global dependencies with yum"
+  ansible.builtin.yum:
+    name: "{{ asdf_yum_global_dependencies }}"
+  become: true
+  retries: "{{ remote_package_retries }}"
+  register: yum_deps_result
+  until: yum_deps_result is succeeded
+  when: ansible_os_family == "RedHat"
+
+- name: "Ensure asdf_dir presence and ownership"
+  ansible.builtin.file:
+    path: "{{ asdf_dir }}"
+    owner: "{{ asdf_user }}"
+    group: "{{ asdf_group }}"
+    state: directory
+    mode: "0755"
+  become: true
+  when: asdf_dir is defined
+
+- name: "Install asdf"
+  ansible.builtin.git:
+    repo: "https://github.com/asdf-vm/asdf.git"
+    dest: "{{ asdf_dir | default(user_info.home + '/.asdf') }}"
+    version: "{{ asdf_version }}"
+  become: true
+  become_user: "{{ asdf_user }}"
+
+- name: "Source asdf script"
+  ansible.builtin.template:
+    src: "asdf.sh.j2"
+    dest: "/etc/profile.d/asdf.sh"
+    owner: "root"
+    group: "{% if ansible_os_family == 'Darwin' %}wheel{% else %}root{% endif %}"
+    mode: "0755"
+  become: true
+  when: asdf_shared_install is true
+
+- name: "Set asdfrc"
+  ansible.builtin.template:
+    src: "asdfrc.j2"
+    dest: "{{ asdf_config_file }}"
+    owner: "{{ asdf_user }}"
+    group: "{{ asdf_group }}"
+    mode: "0644"
+  become: true
+  become_user: "{{ asdf_user }}"
+  when: asdf_config_file is defined

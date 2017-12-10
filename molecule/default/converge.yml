@@ -1,0 +1,30 @@
+---
+- name: Converge
+  hosts: all
+  become: true
+
+  vars:
+    asdf_plugins:
+      - name: nodejs
+        versions:
+          - latest
+        global: latest
+
+  pre_tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+      when: ansible_os_family == 'Debian' or ansible_os_family == 'Ubuntu'
+
+    - name: Install depenedencies
+      ansible.builtin.apt:
+        name: "{{ item }}"
+        state: present
+      with_items:
+        - curl
+        - git
+        - unzip
+      when: ansible_os_family == 'Debian' or ansible_os_family == 'Ubuntu'
+
+  roles:
+    - role: vkhamsao.asdf
